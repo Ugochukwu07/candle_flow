@@ -24,10 +24,11 @@ enum ENUM_DOJI_ACTION
 
 input group "=== CANDLE SETTINGS ==="
 input ENUM_DOJI_ACTION InpDojiAction          = DOJI_SKIP; // Doji behavior
+input bool             InpReverseSignal       = false;     // true = trade opposite of the candle signal (mean-reversion test)
 
 input group "=== POSITION SIZING ==="
 input double           InpInitialLot          = 0.01;      // Base/reset lot size
-input bool             InpEnableMartingale    = true;       // false = fixed lot every trade
+input bool             InpEnableMartingale    = false;      // Off by default - research phase isolates signal from sizing
 input double           InpLotMultiplier       = 2.0;        // Lot multiplier after a loss
 input double           InpMaxLot              = 1.0;        // Hard lot ceiling
 input int              InpMaxConsecutiveLosses= 6;          // Halt trading after N losses in a row
@@ -89,6 +90,7 @@ int OnInit()
    Print("CandleEcho initialized on ", _Symbol, " ", EnumToString((ENUM_TIMEFRAMES)_Period),
          " | base lot=", DoubleToString(g_currentLot,2),
          " | martingale=", (InpEnableMartingale ? "ON" : "OFF"),
+         " | reverse=", (InpReverseSignal ? "ON" : "OFF"),
          " | magic=", InpMagicNumber);
 
    return(INIT_SUCCEEDED);
@@ -173,9 +175,11 @@ void TryOpenNewPosition()
    if(CurrentOpenPositionsCount() >= InpMaxOpenPositions)
       return;
 
-   int direction = GetDirectionFromLastClosedCandle();
-   if(direction == 0)
+   int signalDirection = GetDirectionFromLastClosedCandle();
+   if(signalDirection == 0)
       return; // doji skipped, or no decision
+
+   int direction = InpReverseSignal ? -signalDirection : signalDirection;
 
    double spreadPoints = (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
    if(InpMaxSpreadPoints > 0 && spreadPoints > InpMaxSpreadPoints)
@@ -201,10 +205,11 @@ void TryOpenNewPosition()
       g_positionTicket = (ulong)HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID);
 
    g_barsHeld      = 0;
-   g_lastDirection = direction;
+   g_lastDirection = signalDirection; // DOJI_PREVIOUS tracks the raw candle signal, not the (possibly reversed) trade direction
    g_dailyTradeCount++;
 
    Print("CandleEcho: opened ", (direction == 1 ? "BUY" : "SELL"),
+         (InpReverseSignal ? " [REVERSED]" : ""),
          " lot=", DoubleToString(lot,2), " #", g_positionTicket);
   }
 
@@ -376,8 +381,10 @@ bool IsWithinSession()
   }
 
 //+------------------------------------------------------------------+
-//| Reset daily counters, balance baseline, and the loss-streak halt  |
-//| whenever the server date rolls over.                              |
+//| Reset daily counters, balance baseline, the loss-streak halt, and |
+//| the lot ladder whenever the server date rolls over. The lot must  |
+//| reset in lockstep with the loss counter - otherwise an escalated  |
+//| lot can survive into a day that thinks it has seen zero losses.   |
 //+------------------------------------------------------------------+
 void CheckNewDay()
   {
@@ -396,8 +403,10 @@ void CheckNewDay()
    g_dailyStartBalance  = AccountInfoDouble(ACCOUNT_BALANCE);
    g_tradingHalted      = false;
    g_consecutiveLosses  = 0;
+   g_currentLot         = NormalizeLot(InpInitialLot); // lot must restart with the streak, or an escalated lot survives into a "clean" day
 
-   Print("CandleEcho: new trading day - daily counters reset, balance baseline=", DoubleToString(g_dailyStartBalance,2));
+   Print("CandleEcho: new trading day - daily counters reset, lot reset to ", DoubleToString(g_currentLot,2),
+         ", balance baseline=", DoubleToString(g_dailyStartBalance,2));
   }
 
 //+------------------------------------------------------------------+
